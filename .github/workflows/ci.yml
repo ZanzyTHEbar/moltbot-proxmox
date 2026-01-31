@@ -37,13 +37,8 @@ jobs:
           set -euo pipefail
           tmp="$(mktemp -d)"
           cd "$tmp"
-          url="$(
-            curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest \
-              | grep -E '\"browser_download_url\"' \
-              | cut -d '"' -f4 \
-              | grep -E '(linux_amd64|Linux_x86_64)\\.tar\\.gz$' \
-              | head -n1
-          )"
+          curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest -o release.json
+          url="$(awk -F '\"' '/\"browser_download_url\"/ && /(linux_amd64|Linux_x86_64)\\.tar\\.gz/ { print $4; exit }' release.json)"
           if [ -z "${url:-}" ]; then
             echo "Could not discover gum linux_amd64 tarball URL from GitHub API" >&2
             exit 1
