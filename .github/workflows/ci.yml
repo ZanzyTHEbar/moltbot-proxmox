@@ -37,21 +37,8 @@ jobs:
           set -euo pipefail
           tmp="$(mktemp -d)"
           cd "$tmp"
-          curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest -o release.json
-          url="$(awk -F '\"' '/\"browser_download_url\"/ && /(linux_amd64|Linux_x86_64)\\.tar\\.gz/ { print $4; exit }' release.json)"
-          if [ -z "${url:-}" ]; then
-            echo "Could not discover gum linux_amd64 tarball URL from GitHub API" >&2
-            exit 1
-          fi
-          curl -fsSL "$url" -o gum.tgz
-          tar -xzf gum.tgz
-          bin="$(find . -maxdepth 3 -type f -name gum -perm -u+x | head -n1 || true)"
-          if [ -z "${bin:-}" ]; then
-            echo "Could not locate gum binary in extracted tarball" >&2
-            find . -maxdepth 3 -type f -print
-            exit 1
-          fi
-          sudo install -m 0755 "$bin" /usr/local/bin/gum
+          python3 -c 'import json,re,sys,urllib.request; data=json.load(urllib.request.urlopen("https://api.github.com/repos/charmbracelet/gum/releases/latest")); url=next((a["browser_download_url"] for a in data.get("assets", []) if re.search(r"_amd64\\.deb$", a.get("name",""))), None); sys.exit("Could not discover gum amd64 deb URL from GitHub API") if not url else urllib.request.urlretrieve(url, "gum.deb")'
+          sudo apt-get install -y ./gum.deb
           gum --version
 
       - name: Preflight
