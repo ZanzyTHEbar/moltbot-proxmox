@@ -174,7 +174,7 @@
 - name: Discover container IPv4
   ansible.builtin.command: >-
     pct exec {{ pve_vmid }} -- sh -c
-    "ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1 | head -n1"
+    "ip -4 -o addr show dev eth0 | awk -F'[ /]+' '{print $4}' | head -n1"
   register: lxc_ip
   changed_when: false
 
