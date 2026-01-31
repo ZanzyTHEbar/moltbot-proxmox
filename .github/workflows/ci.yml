@@ -40,7 +40,7 @@ jobs:
           url="$(
             curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest \
               | grep -E '\"browser_download_url\"' \
-              | cut -d '\"' -f4 \
+              | cut -d '"' -f4 \
               | grep -E '(linux_amd64|Linux_x86_64)\\.tar\\.gz$' \
               | head -n1
           )"
