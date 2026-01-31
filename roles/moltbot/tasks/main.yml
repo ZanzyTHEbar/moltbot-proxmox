@@ -1,0 +1,128 @@
+---
+- name: Create moltbot user
+  ansible.builtin.user:
+    name: "{{ moltbot_user }}"
+    home: "{{ moltbot_home }}"
+    shell: /bin/bash
+    create_home: true
+
+- name: Create state + config dirs
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default(moltbot_user) }}"
+    group: "{{ item.group | default(moltbot_user) }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ moltbot_state_dir }}", owner: "{{ moltbot_user }}", group: "{{ moltbot_user }}", mode: "0750" }
+    - { path: "/etc/moltbot", owner: "root", group: "root", mode: "0755" }
+
+- name: Install Node.js 22 + pnpm (Debian)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! command -v node >/dev/null 2>&1; then
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      apt-get install -y nodejs
+    fi
+    if ! command -v pnpm >/dev/null 2>&1; then
+      corepack enable
+      corepack prepare pnpm@latest --activate
+    fi
+  args:
+    executable: /bin/bash
+
+- name: Install MoltBot/Clawdbot CLI into /usr/local (override any broken npm prefix)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export npm_config_prefix=/usr/local
+    # Prefer moltbot package name, but fall back to clawdbot (rename transition).
+    npm install -g --prefix /usr/local "{{ moltbot_npm_package }}@latest" || true
+    npm install -g --prefix /usr/local "clawdbot@latest" || true
+  args:
+    executable: /bin/bash
+
+- name: Detect installed CLI name (moltbot vs clawdbot)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [ -x "/usr/local/bin/{{ moltbot_cli_preferred }}" ]; then
+      echo "/usr/local/bin/{{ moltbot_cli_preferred }}"
+      exit 0
+    fi
+    if [ -x "/usr/local/bin/clawdbot" ]; then
+      echo "/usr/local/bin/clawdbot"
+      exit 0
+    fi
+    if [ -x "/usr/local/bin/moltbot" ]; then
+      echo "/usr/local/bin/moltbot"
+      exit 0
+    fi
+    # Last resort: PATH lookup
+    if command -v "{{ moltbot_cli_preferred }}" >/dev/null 2>&1; then
+      command -v "{{ moltbot_cli_preferred }}"
+      exit 0
+    fi
+    if command -v clawdbot >/dev/null 2>&1; then
+      command -v clawdbot
+      exit 0
+    fi
+    if command -v moltbot >/dev/null 2>&1; then
+      command -v moltbot
+      exit 0
+    fi
+    echo "No moltbot/clawdbot CLI found after install" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  register: cli_detect
+  changed_when: false
+
+- name: Set moltbot_cli_path + moltbot_cli facts
+  ansible.builtin.set_fact:
+    moltbot_cli_path: "{{ cli_detect.stdout | trim }}"
+    moltbot_cli: "{{ (cli_detect.stdout | trim | basename) }}"
+
+- name: Create environment file (secure-by-default, placeholders)
+  ansible.builtin.copy:
+    dest: "{{ moltbot_env_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      # MoltBot environment (fill via ansible-vault or edit securely)
+      NODE_ENV=production
+      # Keep state on a locked-down directory
+      MOLTBOT_STATE_DIR={{ moltbot_state_dir }}
+      # Example LLM keys (DO NOT commit real values):
+      # ANTHROPIC_API_KEY=
+      # OPENAI_API_KEY=
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: moltbot.service.j2
+    dest: /etc/systemd/system/moltbot.service
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Ensure service is disabled until onboarding completes
+  ansible.builtin.service:
+    name: moltbot
+    enabled: false
+    state: stopped
+  when: not (moltbot_enable_service | bool)
+  failed_when: false
+
+- name: Enable + start MoltBot service (only if explicitly requested)
+  ansible.builtin.service:
+    name: moltbot
+    enabled: true
+    state: started
+  when: moltbot_enable_service | bool
+
+- name: Print next steps (interactive provider login)
+  ansible.builtin.debug:
+    msg:
+      - "MoltBot installed. Detected CLI: {{ moltbot_cli }}"
+      - "Next: SSH into the container and run onboarding/provider login (usually interactive):"
+      - "  {{ moltbot_cli }} onboard --install-daemon  (or: {{ moltbot_cli }} configure && {{ moltbot_cli }} providers login)"
+      - "Then re-run with moltbot_enable_service=true if you want systemd-managed startup."
+

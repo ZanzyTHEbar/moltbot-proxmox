@@ -1,0 +1,20 @@
+---
+- name: Proxmox | Create and bootstrap MoltBot LXC
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - role: proxmox_lxc
+
+- name: LXC | Harden OS, install dependencies, install MoltBot
+  hosts: moltbot_lxc
+  gather_facts: true
+  become: true
+  roles:
+    - role: hardening
+    - role: netbird
+      when: netbird_enable | bool
+    - role: tailscale
+      when: tailscale_enable | bool
+    - role: docker
+    - role: moltbot
+

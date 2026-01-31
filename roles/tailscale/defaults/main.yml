@@ -1,0 +1,6 @@
+---
+tailscale_enable: true
+tailscale_authkey: ""
+tailscale_hostname: "moltbot"
+tailscale_enable_ssh: true
+

@@ -1,0 +1,7 @@
+---
+netbird_enable: true
+netbird_setup_key: ""
+netbird_management_url: ""
+netbird_hostname: "moltbot"
+netbird_allow_ssh_over_vpn: true
+

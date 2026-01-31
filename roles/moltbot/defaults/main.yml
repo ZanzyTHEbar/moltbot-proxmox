@@ -1,0 +1,11 @@
+---
+moltbot_user: "moltbot"
+moltbot_home: "/home/moltbot"
+
+moltbot_npm_package: "moltbot"
+moltbot_cli_preferred: "moltbot"
+moltbot_enable_service: false
+
+moltbot_env_path: "/etc/moltbot/moltbot.env"
+moltbot_state_dir: "/var/lib/moltbot"
+

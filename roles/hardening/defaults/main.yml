@@ -1,0 +1,10 @@
+---
+hardening_install_fail2ban: true
+hardening_install_unattended_upgrades: true
+
+admin_allow_cidrs:
+  - "10.0.0.0/8"
+  - "192.168.0.0/16"
+
+tailscale_enable: false
+

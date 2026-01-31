@@ -1,0 +1,44 @@
+---
+- name: Assert auth key present (when enabling tailscale)
+  ansible.builtin.assert:
+    that:
+      - tailscale_authkey | length > 0
+    fail_msg: "tailscale_authkey is empty. Put it in group_vars/all/vault.yml (and encrypt it with ansible-vault)."
+
+- name: Install tailscale apt repo keyring
+  ansible.builtin.shell: |
+    set -euo pipefail
+    install -d -m 0755 /usr/share/keyrings
+    curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
+      -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+    curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \
+      -o /etc/apt/sources.list.d/tailscale.list
+  args:
+    executable: /bin/bash
+    creates: /etc/apt/sources.list.d/tailscale.list
+
+- name: APT | Install tailscale
+  ansible.builtin.apt:
+    update_cache: true
+    name:
+      - tailscale
+    state: present
+
+- name: Service | Enable tailscaled
+  ansible.builtin.service:
+    name: tailscaled
+    state: started
+    enabled: true
+
+- name: Bring up tailscale (idempotent-ish)
+  ansible.builtin.command: >-
+    tailscale up
+    --authkey={{ tailscale_authkey }}
+    --hostname={{ tailscale_hostname }}
+    {% if tailscale_enable_ssh | bool %}--ssh{% endif %}
+    --accept-dns=false
+    --accept-routes=false
+  register: ts_up
+  changed_when: "'Success' in (ts_up.stdout | default('')) or ts_up.rc == 0"
+  failed_when: false
+

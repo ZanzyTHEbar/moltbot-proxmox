@@ -1,0 +1,32 @@
+---
+pve_node: "pve"
+pve_vmid: 1200
+pve_hostname: "moltbot"
+pve_unprivileged: true
+pve_cores: 4
+pve_memory_mb: 8192
+pve_swap_mb: 2048
+pve_template_storage: "local"
+pve_container_storage: "local-lvm"
+pve_disk_gb: 150
+pve_bridge: "vmbr0"
+pve_net_ipv4: "dhcp"
+pve_net_gw4: ""
+pve_notes_personal_github: ""
+pve_notes: |
+  MoltBot LXC
+  Sponsor: https://github.com/sponsors/moltbot
+  Attribution:
+  - Base template: community-scripts/ProxmoxVE (ct/docker.sh) - https://github.com/community-scripts/ProxmoxVE
+  - MoltBot project: https://github.com/moltbot/moltbot
+  {% if pve_notes_personal_github | length > 0 -%}
+  - Personal GitHub: {{ pve_notes_personal_github }}
+  {%- endif %}
+pve_features:
+  nesting: true
+  keyctl: true
+
+bootstrap_admin_user: "moltadmin"
+bootstrap_admin_pubkeys: []
+bootstrap_admin_private_key_file: ""
+

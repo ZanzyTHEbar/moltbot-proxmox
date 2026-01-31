@@ -1,0 +1,9 @@
+.keys/
+inventory/hosts.yml
+group_vars/all/vault.yml
+group_vars/all/local.yml
+.retry
+.keys/
+.vault/
+.cursor/
+group_vars/

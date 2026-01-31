@@ -1,0 +1,80 @@
+---
+- name: Proxmox | Apply LXC resources and restart (CPU/RAM/Disk)
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    - name: Read current CT config
+      ansible.builtin.command: "pct config {{ pve_vmid }}"
+      register: pct_cfg
+      changed_when: false
+
+    - name: Set CPU/RAM/Swap (and enforce cpuset/cpulimit)
+      ansible.builtin.command: >-
+        pct set {{ pve_vmid }}
+        -cores {{ pve_cores }}
+        -memory {{ pve_memory_mb }}
+        -swap {{ pve_swap_mb }}
+      changed_when: true
+
+    - name: Enforce cpuset via LXC config (cgroup2)
+      ansible.builtin.lineinfile:
+        path: "/etc/pve/lxc/{{ pve_vmid }}.conf"
+        regexp: '^lxc\.cgroup2\.cpuset\.cpus:'
+        line: "lxc.cgroup2.cpuset.cpus: 0-{{ (pve_cores | int) - 1 }}"
+        create: false
+      changed_when: true
+
+    - name: Resize rootfs to target size (only grows)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CUR=$(pct config {{ pve_vmid }} | awk -F'size=' '/^rootfs:/ {print $2}' | sed 's/[A-Za-z].*$//')
+        TGT={{ pve_disk_gb | int }}
+        if [ -z "${CUR:-}" ]; then
+          echo "Could not parse current rootfs size" >&2
+          exit 1
+        fi
+        if [ "$TGT" -gt "$CUR" ]; then
+          pct resize {{ pve_vmid }} rootfs "${TGT}G"
+        else
+          echo "No resize needed (current=${CUR}G target=${TGT}G)"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Restart CT to apply CPU/memory changes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pct shutdown {{ pve_vmid }} --timeout 60 || true
+        if ! pct status {{ pve_vmid }} | grep -q stopped; then
+          pct stop {{ pve_vmid }}
+        fi
+        pct start {{ pve_vmid }}
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Verify config from Proxmox
+      ansible.builtin.shell: "pct config {{ pve_vmid }} | egrep '^(cores|memory|swap|rootfs|lxc\\.cgroup2\\.cpuset\\.cpus):'"
+      args:
+        executable: /bin/bash
+      register: verify_cfg
+      changed_when: false
+
+    - name: Print verified config
+      ansible.builtin.debug:
+        var: verify_cfg.stdout_lines
+
+    - name: Verify inside CT (nproc / mem / df)
+      ansible.builtin.command: >-
+        pct exec {{ pve_vmid }} -- /usr/bin/env -i
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        /bin/sh -c
+        'echo nproc=$(nproc); awk "/MemTotal/ {print \"mem_kb=\" \\$2}" /proc/meminfo; df -h / | tail -n 1; echo cpuset_effective=$(cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null || true); echo cpu_max=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || true)'
+      register: verify_inside
+      changed_when: false
+
+    - name: Print inside-CT verification
+      ansible.builtin.debug:
+        var: verify_inside.stdout_lines
+

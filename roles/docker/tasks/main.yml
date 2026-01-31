@@ -1,0 +1,82 @@
+---
+- name: Detect docker
+  ansible.builtin.command: docker --version
+  register: docker_version
+  changed_when: false
+  failed_when: false
+  when: docker_install | bool
+
+- name: Install docker (fallback, if not already present)
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-plugin
+    state: present
+  when: docker_install | bool and docker_version.rc != 0
+
+- name: Enable docker service
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  when: docker_install | bool
+  failed_when: false
+
+- name: "Docker hardening | Prevent containers from being reachable from LAN (DOCKER-USER drop)"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    # Ensure chain exists
+    iptables -N DOCKER-USER 2>/dev/null || true
+    # Ensure established traffic returns
+    iptables -C DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN 2>/dev/null || \
+      iptables -I DOCKER-USER 1 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+    # Allow traffic originating from docker bridge
+    iptables -C DOCKER-USER -i docker0 -j RETURN 2>/dev/null || \
+      iptables -I DOCKER-USER 2 -i docker0 -j RETURN
+    # Default drop anything else attempting to reach containers
+    iptables -C DOCKER-USER -j DROP 2>/dev/null || \
+      iptables -A DOCKER-USER -j DROP
+  args:
+    executable: /bin/bash
+  when: docker_install | bool
+
+- name: "Docker hardening | Install systemd unit to reapply DOCKER-USER rules on boot"
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker-user-chain.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Apply DOCKER-USER iptables policy (LAN protection)
+      After=docker.service
+      Wants=docker.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash -lc '\
+        iptables -N DOCKER-USER 2>/dev/null || true; \
+        iptables -C DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN 2>/dev/null || iptables -I DOCKER-USER 1 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN; \
+        iptables -C DOCKER-USER -i docker0 -j RETURN 2>/dev/null || iptables -I DOCKER-USER 2 -i docker0 -j RETURN; \
+        iptables -C DOCKER-USER -j DROP 2>/dev/null || iptables -A DOCKER-USER -j DROP; \
+      '
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+  when: docker_install | bool
+
+- name: "Docker hardening | Enable docker-user-chain service"
+  ansible.builtin.systemd:
+    name: docker-user-chain.service
+    enabled: true
+    daemon_reload: true
+    state: started
+  when: docker_install | bool
+
+- name: Add moltbot user to docker group (optional convenience)
+  ansible.builtin.user:
+    name: "{{ moltbot_user }}"
+    groups: docker
+    append: true
+  when: docker_install | bool
+  failed_when: false
+

@@ -1,0 +1,188 @@
+---
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - pve_template_storage | length > 0
+      - pve_container_storage | length > 0
+      - (pve_disk_gb | int) >= 4
+      - bootstrap_admin_pubkeys | length > 0
+      - (pve_net_ipv4 | lower) == "dhcp"
+    fail_msg: >-
+      Missing required vars. Ensure pve_template_storage, pve_container_storage, pve_disk_gb are set and
+      bootstrap_admin_pubkeys has at least one SSH public key string. This flow requires DHCP.
+
+- name: Check if container exists
+  ansible.builtin.command: "pct status {{ pve_vmid }}"
+  register: pct_status
+  changed_when: false
+  failed_when: false
+
+- name: Preseed community-scripts diagnostics (avoid whiptail prompt)
+  ansible.builtin.copy:
+    dest: /usr/local/community-scripts/diagnostics
+    mode: "0644"
+    content: |
+      DIAGNOSTICS=no
+  when: pct_status.rc != 0
+
+- name: Preseed community-scripts default.vars (avoid any whiptail prompts)
+  ansible.builtin.copy:
+    dest: /usr/local/community-scripts/default.vars
+    mode: "0644"
+    content: |
+      # Community-Scripts defaults (var_* only). Lines starting with # are comments.
+      # Precedence: ENV var_* > default.vars > built-ins.
+      # This file is managed by Ansible for unattended installs.
+      var_ctid={{ pve_vmid }}
+      var_hostname={{ pve_hostname }}
+      var_unprivileged={{ 1 if pve_unprivileged else 0 }}
+      var_cpu={{ pve_cores }}
+      var_ram={{ pve_memory_mb }}
+      var_disk={{ pve_disk_gb }}
+      var_brg={{ pve_bridge }}
+      var_net=dhcp
+      var_ipv6_method=none
+      var_nesting={{ 1 if (pve_features.nesting | bool) else 0 }}
+      var_keyctl={{ 1 if (pve_features.keyctl | bool) else 0 }}
+      var_template_storage={{ pve_template_storage }}
+      var_container_storage={{ pve_container_storage }}
+      var_ssh=yes
+      var_ssh_authorized_key={{ bootstrap_admin_pubkeys[0] }}
+      var_verbose=no
+  when: pct_status.rc != 0
+
+- name: Create LXC using community-scripts ct/docker.sh (non-interactive)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export TERM=xterm
+    # NOTE: community-scripts `start()` does not forward CLI args to install_script().
+    # Use env var `mode` to bypass the whiptail menu.
+    export mode="userdefaults"
+    # Run in userdefaults mode to bypass whiptail menu.
+    # Provide blank input so any `read -p` prompts default to "No" BUT still return success.
+    export var_ctid="{{ pve_vmid }}"
+    export var_hostname="{{ pve_hostname }}"
+    export var_cpu="{{ pve_cores }}"
+    export var_ram="{{ pve_memory_mb }}"
+    export var_disk="{{ pve_disk_gb }}"
+    export var_unprivileged="{{ 1 if pve_unprivileged else 0 }}"
+    export var_brg="{{ pve_bridge }}"
+    export var_net="dhcp"
+    export var_ipv6_method="none"
+    export var_nesting="{{ 1 if (pve_features.nesting | bool) else 0 }}"
+    export var_keyctl="{{ 1 if (pve_features.keyctl | bool) else 0 }}"
+    export var_template_storage="{{ pve_template_storage }}"
+    export var_container_storage="{{ pve_container_storage }}"
+    export var_ssh="yes"
+    export var_ssh_authorized_key="{{ bootstrap_admin_pubkeys[0] }}"
+
+    tmp_in="$(mktemp)"
+    # 200 lines is plenty for installer prompts.
+    for _ in $(seq 1 200); do echo; done > "$tmp_in"
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/docker.sh)" < "$tmp_in"
+    rc=$?
+    rm -f "$tmp_in"
+    exit "$rc"
+  args:
+    executable: /bin/bash
+  when: pct_status.rc != 0
+
+- name: Set LXC notes/description for Proxmox UI
+  ansible.builtin.command:
+    argv:
+      - pct
+      - set
+      - "{{ pve_vmid }}"
+      - -description
+      - "{{ pve_notes }}"
+  when: pve_notes | length > 0
+
+- name: Ensure LXC is started
+  ansible.builtin.command: "pct start {{ pve_vmid }}"
+  register: pct_start
+  changed_when: "'already running' not in (pct_start.stderr | default(''))"
+  failed_when: false
+
+- name: Wait for container init (short pause)
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: Bootstrap base packages inside container (ssh + python + sudo)
+  ansible.builtin.command: >-
+    pct exec {{ pve_vmid }} -- bash -lc
+    "export DEBIAN_FRONTEND=noninteractive;
+     apt-get update -y &&
+     apt-get install -y --no-install-recommends openssh-server python3 sudo ca-certificates curl gnupg &&
+     systemctl enable --now ssh || systemctl enable --now sshd"
+  register: bootstrap_pkgs
+  changed_when: true
+
+- name: Create admin user inside container
+  ansible.builtin.command: >-
+    pct exec {{ pve_vmid }} -- bash -lc
+    "id -u {{ bootstrap_admin_user }} >/dev/null 2>&1 ||
+     (useradd -m -s /bin/bash {{ bootstrap_admin_user }} && usermod -aG sudo {{ bootstrap_admin_user }} )"
+  changed_when: true
+
+- name: Allow passwordless sudo for bootstrap admin (required for Ansible become)
+  ansible.builtin.command: >-
+    pct exec {{ pve_vmid }} -- bash -lc
+    "install -d -m 0755 /etc/sudoers.d &&
+     printf '%s\\n' '{{ bootstrap_admin_user }} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{{ bootstrap_admin_user }} &&
+     chmod 0440 /etc/sudoers.d/{{ bootstrap_admin_user }}"
+  changed_when: true
+
+- name: Create temp authorized_keys on Proxmox host
+  ansible.builtin.copy:
+    dest: "/tmp/moltbot_authorized_keys_{{ pve_vmid }}"
+    mode: "0600"
+    content: "{{ (bootstrap_admin_pubkeys | join('\n')) ~ '\n' }}"
+
+- name: Ensure .ssh directory exists with correct perms inside container
+  ansible.builtin.command: >-
+    pct exec {{ pve_vmid }} -- bash -lc
+    "install -d -m 0700 -o {{ bootstrap_admin_user }} -g {{ bootstrap_admin_user }} /home/{{ bootstrap_admin_user }}/.ssh"
+  changed_when: true
+
+- name: Push authorized_keys into container
+  ansible.builtin.command: >-
+    pct push {{ pve_vmid }} /tmp/moltbot_authorized_keys_{{ pve_vmid }}
+    /home/{{ bootstrap_admin_user }}/.ssh/authorized_keys --perms 0600
+  changed_when: true
+
+- name: Fix ownership of authorized_keys inside container
+  ansible.builtin.command: >-
+    pct exec {{ pve_vmid }} -- bash -lc
+    "chown {{ bootstrap_admin_user }}:{{ bootstrap_admin_user }} /home/{{ bootstrap_admin_user }}/.ssh/authorized_keys"
+  changed_when: true
+
+- name: Remove temp authorized_keys from Proxmox host
+  ansible.builtin.file:
+    path: "/tmp/moltbot_authorized_keys_{{ pve_vmid }}"
+    state: absent
+
+- name: Harden sshd (disable root & password auth) early
+  ansible.builtin.command: >-
+    pct exec {{ pve_vmid }} -- bash -lc
+    "SSHD=/etc/ssh/sshd_config;
+     grep -q '^PermitRootLogin' $SSHD && sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' $SSHD || echo 'PermitRootLogin no' >> $SSHD;
+     grep -q '^PasswordAuthentication' $SSHD && sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' $SSHD || echo 'PasswordAuthentication no' >> $SSHD;
+     grep -q '^PubkeyAuthentication' $SSHD && sed -i 's/^PubkeyAuthentication.*/PubkeyAuthentication yes/' $SSHD || echo 'PubkeyAuthentication yes' >> $SSHD;
+     systemctl restart ssh || systemctl restart sshd"
+  changed_when: true
+
+- name: Discover container IPv4
+  ansible.builtin.command: >-
+    pct exec {{ pve_vmid }} -- sh -c
+    "ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1 | head -n1"
+  register: lxc_ip
+  changed_when: false
+
+- name: Add dynamic host for subsequent plays
+  ansible.builtin.add_host:
+    name: "{{ pve_hostname }}"
+    groups: "moltbot_lxc"
+    ansible_host: "{{ lxc_ip.stdout | trim }}"
+    ansible_user: "{{ bootstrap_admin_user }}"
+    ansible_ssh_private_key_file: "{{ bootstrap_admin_private_key_file | default('') }}"
+

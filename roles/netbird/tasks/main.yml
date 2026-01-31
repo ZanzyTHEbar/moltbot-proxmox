@@ -1,0 +1,64 @@
+---
+- name: Assert NetBird setup key present
+  ansible.builtin.assert:
+    that:
+      - netbird_setup_key | length > 0
+    fail_msg: "netbird_setup_key is empty. Put it in group_vars/all/vault.yml and encrypt with ansible-vault."
+
+- name: Install NetBird (official install script)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if command -v netbird >/dev/null 2>&1; then
+      exit 0
+    fi
+    curl -fsSL https://pkgs.netbird.io/install.sh | bash
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Enable netbird service (if present)
+  ansible.builtin.service:
+    name: netbird
+    state: started
+    enabled: true
+  failed_when: false
+
+- name: Bring NetBird up (join network)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ARGS=(up --setup-key "{{ netbird_setup_key }}" --hostname "{{ netbird_hostname }}")
+    if [ -n "{{ netbird_management_url }}" ]; then
+      ARGS+=(--management-url "{{ netbird_management_url }}")
+    fi
+    netbird "${ARGS[@]}"
+  args:
+    executable: /bin/bash
+  register: netbird_up
+  changed_when: true
+  failed_when: false
+
+- name: Detect NetBird interface name
+  ansible.builtin.shell: |
+    set -euo pipefail
+    # Common interface names observed for NetBird/WireGuard-based tunnels.
+    for i in netbird0 wt0 wg0; do
+      if ip link show "$i" >/dev/null 2>&1; then
+        echo "$i"
+        exit 0
+      fi
+    done
+    # Fallback: try to find any interface with a NetBird-ish name.
+    ip -o link show | awk -F': ' '{print $2}' | grep -E '^netbird' | head -n1 || true
+  args:
+    executable: /bin/bash
+  register: netbird_iface
+  changed_when: false
+
+- name: Allow SSH on NetBird interface (UFW)
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    interface_in: "{{ netbird_iface.stdout | trim }}"
+  when: netbird_allow_ssh_over_vpn | bool and (netbird_iface.stdout | trim | length > 0)
+

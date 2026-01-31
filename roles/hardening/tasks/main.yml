@@ -1,0 +1,121 @@
+---
+- name: APT | Update cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: APT | Upgrade base packages (safe)
+  ansible.builtin.apt:
+    upgrade: safe
+
+- name: Packages | Baseline
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - jq
+      - git
+      - ufw
+      - sudo
+    state: present
+
+- name: Packages | Optional hardening tools
+  ansible.builtin.apt:
+    name:
+      - fail2ban
+    state: present
+  when: hardening_install_fail2ban | bool
+
+- name: Packages | Firewall extras (recommended)
+  ansible.builtin.apt:
+    name:
+      - iptables
+    state: present
+
+- name: Packages | Unattended upgrades
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+    state: present
+  when: hardening_install_unattended_upgrades | bool
+
+- name: SSH | Ensure sshd running
+  ansible.builtin.service:
+    name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
+    state: started
+    enabled: true
+  failed_when: false
+
+- name: SSH | Harden sshd_config
+  ansible.builtin.blockinfile:
+    path: /etc/ssh/sshd_config
+    create: false
+    marker: "# {mark} ANSIBLE MOLTBOT HARDENING"
+    block: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      X11Forwarding no
+      AllowTcpForwarding no
+      PermitEmptyPasswords no
+      MaxAuthTries 3
+  notify: Restart ssh
+
+- name: Firewall | Set sane defaults
+  community.general.ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+
+- name: Firewall | Allow all outgoing
+  community.general.ufw:
+    policy: allow
+    direction: outgoing
+
+- name: "Firewall | Allow SSH (preferred: Tailscale only)"
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    interface_in: tailscale0
+  when: tailscale_enable | bool
+
+- name: Firewall | Allow SSH from admin CIDRs (when not using Tailscale)
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    from_ip: "{{ item }}"
+  loop: "{{ admin_allow_cidrs }}"
+  when: not (tailscale_enable | bool)
+
+- name: fail2ban | Minimal jail for sshd
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.local
+    mode: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      maxretry = 3
+      findtime = 10m
+      bantime  = 1h
+      banaction = ufw
+  notify: Restart fail2ban
+  when: hardening_install_fail2ban | bool
+
+- name: fail2ban | Enable service
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+  when: hardening_install_fail2ban | bool
+  failed_when: false
+
+- name: UFW | Ensure UFW is enabled on boot
+  ansible.builtin.service:
+    name: ufw
+    state: started
+    enabled: true
+  failed_when: false
